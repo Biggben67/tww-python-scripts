@@ -15,8 +15,8 @@ opens zoomed in much further than ss_navigator.
 
 - Scroll to zoom (toward the cursor). No panning — zoom out to see more.
 - Click the grid to set a target; or snap it to Link with the button.
-- Driven by on_hostupdate (UI/draw) + on_frameadvance (memory + stick), so the
-  view stays live while the game is paused.
+- Frame advance handles live state, movement, and drawing. Host updates redraw
+  cached state while emulation is paused without touching game memory.
 """
 from __future__ import annotations
 import math
@@ -216,7 +216,6 @@ def _drive_toward(cur_x: float, cur_z: float) -> None:
 
 
 # ── memory read + stick drive (emu thread only) ─────────────────────
-@event.on_frameadvance
 def _read_state() -> None:
     global _cur_x, _cur_z, _facing_hw, _have_state, _at_target
 
@@ -241,16 +240,8 @@ def _read_state() -> None:
         _have_state = False
         return
 
-    if _armed and _dest_set:
-        try:
-            _drive_toward(_cur_x, _cur_z)
-        except Exception:
-            pass
-
-
 # ── input + draw (host thread; safe while paused) ───────────────────
-@event.on_hostupdate
-def update() -> None:
+def _update_view() -> None:
     global _dest_x, _dest_z, _dest_set, _armed, _anim, _centered
 
     _anim += 1
@@ -360,6 +351,24 @@ def update() -> None:
                     % (_dest_x, _dest_z, dist, atd, state))
     else:
         _status.set("Click the grid to set a target")
+
+
+@event.on_frameadvance
+def on_frameadvance() -> None:
+    """Refresh live state, process UI, then apply movement for this frame."""
+    _read_state()
+    _update_view()
+    if _armed and _dest_set and _have_state:
+        try:
+            _drive_toward(_cur_x, _cur_z)
+        except Exception:
+            pass
+
+
+@event.on_hostupdate
+def on_hostupdate() -> None:
+    """Keep the detached window interactive while the emulator is paused."""
+    _update_view()
 
 
 def _draw_grid(cw: float, ch: float, step: float) -> None:
