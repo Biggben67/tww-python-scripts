@@ -460,7 +460,6 @@ def _run_charge(cur_x: float, cur_z: float) -> None:
     _set_main(msx, msy)
 
 # ── memory read (emu thread only) ───────────────────────────────────
-@event.on_frameadvance
 def _read_state() -> None:
     global _player, _cur_x, _cur_z, _facing_hw, _have_state, _current_stage
 
@@ -503,8 +502,7 @@ def _read_state() -> None:
         _reset_charge()
 
 # ── input + draw (host thread; safe while paused) ───────────────────
-@event.on_hostupdate
-def update() -> None:
+def _update_canvas() -> None:
     global _dest_x, _dest_z, _dest_set, _cal_shown
     global _armed, _angle_mode, _dest_prev, _angle_prev, _ARROW_HW, _anim
 
@@ -699,3 +697,16 @@ def update() -> None:
                     f"Angle to dest={atd}     Quadrants={qd:.4f}")
     else:
         _status.set("Click the map to set a destination")
+
+
+@event.on_frameadvance
+def on_frameadvance() -> None:
+    """Refresh game state and the canvas once per emulated frame."""
+    _read_state()
+    _update_canvas()
+
+
+@event.on_hostupdate
+def on_hostupdate() -> None:
+    """Keep the map responsive while emulation is paused."""
+    _update_canvas()
