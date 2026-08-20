@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """TWW JP ESS R/L hold-before-drop search with a moving slot-4 checkpoint.
 
 Slot 5 is the default state. Each side is first held until a speed drop is seen. The script then reloads the current state,
@@ -7,22 +5,27 @@ replays that side only until two frames before the observed drop, switches ESS,
 and saves the temp slot on that exact switch frame.
 """
 
+from __future__ import annotations
+
 from typing import Optional
 
 from dolphin import controller, event, gui, memory, savestate
+
+from ww.addresses.address import Address
 
 
 CONTROLLER_ID = 0
 BASE_STATE_SLOT = 5
 TEMP_STATE_SLOT = 4
 
-PLAYER_PTR_ADDR = 0x803BD910
-POTENTIAL_SPEED_PTR_ADDR = 0x803AD860
-GAME_FRAME_COUNTER_ADDR = 0x803E9D34
+# Every player read below resolves through Address.PLAYER_POINTER, which derefs
+# to the daPy_lk_c class base, so these are raw decomp class offsets.
+PLAYER_PTR_ADDR = Address.PLAYER_POINTER
+GAME_FRAME_COUNTER_ADDR = Address.FRAME_COUNTER_ADDRESS
 
-OFFSET_CURRENT_ANGLE_Y = 0x206
-OFFSET_M34E8_CAMERA_STICK_ANGLE = 0x34E8
-OFFSET_POTENTIAL_SPEED = 0x34E4
+OFFSET_CURRENT_ANGLE_Y = Address.PLAYER_CURRENT_ANGLE_Y_OFFSET
+OFFSET_M34E8_CAMERA_STICK_ANGLE = Address.PLAYER_TARGET_FACING_OFFSET
+OFFSET_POTENTIAL_SPEED = Address.PLAYER_POTENTIAL_SPEED_OFFSET
 
 ESS_RIGHT_X = 146
 ESS_LEFT_X = 110
@@ -208,7 +211,7 @@ def _read_game_frame() -> Optional[int]:
 
 def _read_all() -> Readings:
     return Readings(
-        potential_speed=_read_f32_ptr(POTENTIAL_SPEED_PTR_ADDR, OFFSET_POTENTIAL_SPEED),
+        potential_speed=_read_f32_ptr(PLAYER_PTR_ADDR, OFFSET_POTENTIAL_SPEED),
         current_angle_y=_read_u16_ptr(PLAYER_PTR_ADDR, OFFSET_CURRENT_ANGLE_Y),
         m34e8=_read_u16_ptr(PLAYER_PTR_ADDR, OFFSET_M34E8_CAMERA_STICK_ANGLE),
     )

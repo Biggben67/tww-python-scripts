@@ -22,7 +22,17 @@ class Address:
     ACTUAL_SPEED_POINTER: int  = RegionalValue(japan=0x803B02E4)
     ACTUAL_SPEED_ADDRESS_OFFSET: int    = RegionalValue(japan=0x00000444)  # +0x444 from the dereferenced base
 
-    # Player “data”/actor base pointer (u32 at this address → Player struct)
+    # THE player base pointer: derefs to Link's fopAc_ac_c / daPy_lk_c class base,
+    # so decomp class offsets apply to it unadjusted. Verified live on GZLJ01
+    # 2026-08-20: deref + ACTOR_XYZ_OFFSET (0x1F8) held 800.947815, matching the
+    # Link position global exactly, and deref + raw decomp offsets reproduced
+    # tools/dolphin_mem.py's target_angle / travel_angle / msd / potential_speed.
+    # Not named in the decomp; it sits at g_dComIfG_gameInfo + 0x5808.
+    #
+    # NOTE: a second global, 0x803AD860, derefs 0xD8 FURTHER INTO the same object
+    # (delta verified constant at 0xD8 across four savestates). It is not the actor
+    # base, so offsets measured against it are (decomp offset - 0xD8). Several older
+    # scripts and tools/dolphin_mem.py entries still use it; prefer this pointer.
     PLAYER_POINTER: int                    = RegionalValue(japan=0x803BD910)
 
     # Animation fields (relative to Link base)
@@ -33,11 +43,16 @@ class Address:
     # Link’s state field (relative to Link base)
     PLAYER_STATE: int                    = RegionalValue(japan=0x000031D8)
 
-    # Player position fields
-    PLAYER_TARGET_FACING_OFFSET: int     = RegionalValue(japan=0x00034E8)
+    # Player position fields (relative to PLAYER_POINTER / the daPy_lk_c base)
+    PLAYER_TARGET_FACING_OFFSET: int     = RegionalValue(japan=0x00034E8)  # s16 m34E8
+    PLAYER_CURRENT_ANGLE_Y_OFFSET: int   = RegionalValue(japan=0x00000206)  # s16 current.angle.y
+    PLAYER_POTENTIAL_SPEED_OFFSET: int   = RegionalValue(japan=0x000035BC)  # f32 mNormalSpeed
     
-    # Player stick info
-    STICK_DISTANCE_OFFSET: int          = RegionalValue(japan=0x000035B4) # offset from player pointer
+    # Player stick info. mStickDistance (0x35B0) is the value the swim/land procs
+    # actually gate on; the 0x35B4 field beside it (m35B4) is a copy that lags by a
+    # frame -- see tools/dolphin_mem.py's "msd" vs "stick_distance" entries.
+    PLAYER_STICK_DISTANCE_OFFSET: int   = RegionalValue(japan=0x000035B0) # f32 mStickDistance
+    STICK_DISTANCE_OFFSET: int          = RegionalValue(japan=0x000035B4) # f32 m35B4 (1-frame-late copy)
     
     # Equipent
     EQUIPPED_ITEM_Y: int                = RegionalValue(japan=0x803BDCD0)
@@ -81,8 +96,13 @@ class Address:
     ACTOR_XYZ_OFFSET: int        = RegionalValue(japan=0x1F8)
     ACTOR_XYZ_SPEED_OFFSET: int  = RegionalValue(japan=0x220)
     ACTOR_SPEED_OFFSET: int      = RegionalValue(japan=0x254)
-    ACTOR_XYZ_ANGLE_OFFSET: int  = RegionalValue(japan=0x20C)
+    ACTOR_XYZ_ANGLE_OFFSET: int  = RegionalValue(japan=0x20C)  # csXyz shape_angle (NOT current.angle)
     ACTOR_GRAVITY_OFFSET: int    = RegionalValue(japan=0x600)
+    ACTOR_OLD_XYZ_OFFSET: int    = RegionalValue(japan=0x1E4)  # actor_place old
+    # actor_place = { cXyz pos @ +0x00; csXyz angle @ +0x0C }, so current.angle
+    # is ACTOR_XYZ_OFFSET + ACTOR_PLACE_ANGLE_OFFSET (0x204) and .y is +0x206.
+    ACTOR_PLACE_ANGLE_OFFSET: int = RegionalValue(japan=0x00C)
+    ACTOR_SCALE_OFFSET: int      = RegionalValue(japan=0x214)  # cXyz scale
 
     # ItemDrop offsets
     ITEMDROP_TYPE_OFFSET: int    = RegionalValue(japan=0x63A)
@@ -115,3 +135,11 @@ class Address:
 
     # InputBuffer
     INPUT_BUFFER: int                  = RegionalValue(japan=0x803E4410)
+
+    # Engine globals
+    GAME_INFO: int                     = RegionalValue(japan=0x803B8108)  # g_dComIfG_gameInfo
+    ROOM_NO: int                       = RegionalValue(japan=0x803E9F48)  # u8 current room number
+    # g_fopAcTg_Queue. ACTOR_LIST_HEAD above is the +0x04 head pointer.
+    ACTOR_QUEUE_BASE: int              = RegionalValue(japan=0x803654C8)
+    ROOM_STATUS_BASE: int              = RegionalValue(japan=0x803B1188)  # dStage_roomControl_c::mStatus[]
+    ZONE_ARRAY_BASE: int               = RegionalValue(japan=0x803B88B0)  # dSv_info_c::mZone[]

@@ -3,7 +3,8 @@
 Superswim Navigator — shows where Link is on the Great Sea, which way he is
 facing, and projects the expected superswim path toward a clicked destination.
 - Scroll to zoom. Click the map to set a destination.
-- Driven by on_hostupdate so it stays live while the game is paused.
+- Drawing/input run on on_hostupdate so the map stays live while paused;
+  on_frameadvance owns memory reads and the charge.
 """
 from __future__ import annotations
 import math
@@ -701,9 +702,14 @@ def _update_canvas() -> None:
 
 @event.on_frameadvance
 def on_frameadvance() -> None:
-    """Refresh game state and the canvas once per emulated frame."""
+    """Refresh game state (and run the charge) once per emulated frame.
+
+    _update_canvas() is deliberately NOT called here. It owns the two mode
+    checkboxes' edge-triggered mutual exclusion, which reads and writes
+    _dest_prev/_angle_prev; running it from both threads let one tick observe
+    the other's half-applied flip and clear BOTH boxes, silently disarming.
+    """
     _read_state()
-    _update_canvas()
 
 
 @event.on_hostupdate
