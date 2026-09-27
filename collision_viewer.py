@@ -14,8 +14,16 @@ from dolphin import debug, event, gui, memory
 
 from ww.actor import proc_name
 from ww.addresses.address import Address
+from ww.collider import (ColliderDecoder, attack_info as _collider_attack_info,
+                         attack_type_names as _attack_type_names, finite_vec as _finite_vec,
+                         target_type_name as _target_type_names, u16 as _u16, u32 as _u32,
+                         valid_ptr as _valid_ptr, vec3 as _vec3)
 from ww.collision_geo import read_collision
 from ww.cull import read_camera
+from ww.viewer_math import (ViewerCamera, add_scaled as _add_scaled,
+                            angles_from_forward as _angles_from_forward, cross as _cross,
+                            dot as _dot, forward_from_angles as _forward_from_angles,
+                            normalize as _norm, screen_ray as _screen_ray, sub as _sub)
 
 
 class DolphinReader:
@@ -24,6 +32,7 @@ class DolphinReader:
 
 
 RD = DolphinReader()
+COLLIDER_DECODER = ColliderDecoder(RD, memory.read_u32)
 
 
 def _address(name, jp_fallback):
@@ -44,80 +53,6 @@ CCS_ATTACK = 0x0000
 CCS_TARGET = 0x0400
 CCS_CONTACT = 0x1000
 CCS_SLOT_COUNT = 0x100
-AT_TYPE_SWORD = 0x2
-AT_TYPE_UNK8 = 0x8
-AT_TYPE_BOMB = 0x20
-AT_TYPE_BOOMERANG = 0x40
-AT_TYPE_BOKO_STICK = 0x80
-AT_TYPE_WATER = 0x100
-AT_TYPE_FIRE = 0x200
-AT_TYPE_MACHETE = 0x400
-AT_TYPE_UNK800 = 0x800
-AT_TYPE_SPIKE = 0x1000
-AT_TYPE_UNK2000 = 0x2000
-AT_TYPE_NORMAL_ARROW = 0x4000
-AT_TYPE_HOOKSHOT = 0x8000
-AT_TYPE_SKULL_HAMMER = 0x10000
-AT_TYPE_UNK20000 = 0x20000
-AT_TYPE_FIRE_ARROW = 0x40000
-AT_TYPE_ICE_ARROW = 0x80000
-AT_TYPE_LIGHT_ARROW = 0x100000
-AT_TYPE_WIND = 0x200000
-AT_TYPE_UNK400000 = 0x400000
-AT_TYPE_LIGHT = 0x800000
-AT_TYPE_STALFOS_MACE = 0x1000000
-AT_TYPE_FAN_SWING = 0x2000000
-AT_TYPE_DARKNUT_SWORD = 0x4000000
-AT_TYPE_GRAPPLING_HOOK = 0x8000000
-AT_TYPE_MOBLIN_SPEAR = 0x10000000
-AT_TYPE_PGANON_SWORD = 0x20000000
-
-# (flag, name) pairs instead of a name-only tuple keyed by position -- the
-# original ATTACK_TYPE_NAMES tuple had a missing comma between
-# "GRAPPLING_HOOK" and "MOBLIN_SPEAR" (Python silently concatenated them into
-# one string literal), which shifted every name after it out of alignment
-# with its bit. Pairing each name directly with its flag sidesteps that whole
-# class of bug -- order in the tuple no longer matters.
-ATTACK_TYPE_FLAGS = (
-    (AT_TYPE_SWORD, "SWORD"),
-    (AT_TYPE_UNK8, "IMPACT"),
-    (AT_TYPE_BOMB, "BOMB"),
-    (AT_TYPE_BOOMERANG, "BOOMERANG"),
-    (AT_TYPE_BOKO_STICK, "BOKO_STICK"),
-    (AT_TYPE_WATER, "WATER"),
-    (AT_TYPE_FIRE, "FIRE"),
-    (AT_TYPE_MACHETE, "MACHETE"),
-    (AT_TYPE_UNK800, "ENERGY"),
-    (AT_TYPE_SPIKE, "SPIKE"),
-    (AT_TYPE_UNK2000, "SPIN"),
-    (AT_TYPE_NORMAL_ARROW, "NORMAL_ARROW"),
-    (AT_TYPE_HOOKSHOT, "HOOKSHOT"),
-    (AT_TYPE_SKULL_HAMMER, "SKULL_HAMMER"),
-    (AT_TYPE_UNK20000, "FLAME"),
-    (AT_TYPE_FIRE_ARROW, "FIRE_ARROW"),
-    (AT_TYPE_ICE_ARROW, "ICE_ARROW"),
-    (AT_TYPE_LIGHT_ARROW, "LIGHT_ARROW"),
-    (AT_TYPE_WIND, "WIND"),
-    (AT_TYPE_UNK400000, "WIND_GUST"),
-    (AT_TYPE_LIGHT, "LIGHT"),
-    (AT_TYPE_STALFOS_MACE, "STALFOS_MACE"),
-    (AT_TYPE_FAN_SWING, "FAN_SWING"),
-    (AT_TYPE_DARKNUT_SWORD, "DARKNUT_SWORD"),
-    (AT_TYPE_GRAPPLING_HOOK, "GRAPPLING_HOOK"),
-    (AT_TYPE_MOBLIN_SPEAR, "MOBLIN_SPEAR"),
-    (AT_TYPE_PGANON_SWORD, "PGANON_SWORD"),
-)
-# OR of every known flag, so leftover/unknown bits can still be surfaced
-# (as a raw hex value) instead of silently dropped.
-ATTACK_TYPE_MASK = 0
-for _at_flag, _at_name in ATTACK_TYPE_FLAGS:
-    ATTACK_TYPE_MASK |= _at_flag
-del _at_flag, _at_name
-
-CCS_DAMAGE_TYPE_OFFSET = 0x10
-CCS_DAMAGE_VALUE_OFFSET = 0x14
-
-
 CCS_TARGET_SLOT_COUNT = 0x300
 CCS_ATTACK_COUNT = 0x2800
 CCS_TARGET_COUNT = 0x2804
@@ -126,10 +61,6 @@ COLLIDER_SNAPSHOT_WATCH = CCS_BASE + CCS_ATTACK_COUNT
 COLLIDER_ATTACK_SPRM = 0x000
 COLLIDER_TARGET_SPRM = 0x018
 COLLIDER_CONTACT_SPRM = 0x02C
-# cCcD_ObjTg::mType sits at +0x10 within its own object, the same relative
-# offset as cCcD_ObjAt::mType (see c_cc_d.h and CCS_DAMAGE_TYPE_OFFSET
-# above) -- mObjTg itself just starts COLLIDER_TARGET_SPRM bytes into the
-# collider record instead of at 0.
 CCS_TARGET_TYPE_OFFSET = COLLIDER_TARGET_SPRM + 0x10
 ACTOR_QUEUE = _address("ACTOR_QUEUE_BASE", 0x803654C8)
 ACTOR_PROC = _address("ACTOR_GPROC_ID_OFFSET", 0x008)
@@ -160,28 +91,7 @@ PLAYER_STATE_COLLIDER_OFFSETS = (0x40FC, 0x422C, 0x435C, 0x448C,
                                   0x45BC, 0x46EC, 0x481C)
 STATE_OVERLAY_HISTORY_LIMIT = 96
 
-SHAPE_VTABLES = {
-    "sphere": (0x8037D070, 0x8037D068, 0x80388788, 0x80388780),
-    "capsule": (0x8037D104, 0x8037D0FC, 0x80388848, 0x80388840),
-    "cylinder": (0x8037E5B0, 0x8037E5A8, 0x803887E8, 0x803887E0),
-    "triangle": (0x803888A8, 0x803888A0),
-}
-SHAPE_VTABLE_TO_KIND = {
-    vtable: kind for kind, vtables in SHAPE_VTABLES.items() for vtable in vtables
-}
-# A shape's v table may point to a derived table rather than one of the
-# four base table addresses above.
-SHAPE_CROSS_AT_TG_CPS = {
-    0x8023FEC4: "sphere",
-    0x8023FB8C: "cylinder",
-    0x8023F6F0: "capsule",
-    0x8023F428: "triangle",
-}
-_shape_vtable_kind_cache = {}
-
-# Trigger actor process IDs from d_procname.h.  The event tags all use the
-# actor's DZS transform as a cylinder. Scene change tags are
-# represented by their transform as a box.
+# Trigger actor process IDs from d_procname.h.
 PROC_TAG_EVSW = 0x001C
 PROC_TAG_SO = 0x0025
 PROC_SCENECHG = 0x002B
@@ -247,10 +157,7 @@ HP_BAR_WIDTH = 52.0
 HP_BAR_HEIGHT = 7.0
 MAX_HP_BARS = 96
 ATTACK_LABEL_MARGIN = 20.0
-# Extra height (on top of ATTACK_LABEL_MARGIN, i.e. on top of an Info label
-# at the same collider) an Attack/Target/Contact Actor label is anchored
-# at, so the two stack as separate lines instead of drawing on top of each
-# other when both are enabled together for the same collider category.
+# Separates actor names from collider info at the same anchor.
 ACTOR_LABEL_EXTRA_MARGIN = 20.0
 MOVE_ACTOR_AXIS_PIXELS = 78.0
 MOVE_ACTOR_AXIS_PICK_RADIUS = 13.0
@@ -260,9 +167,7 @@ C_MOVE_Y = 0xFF62E986
 C_MOVE_Z = 0xFF5A9DFF
 C_MOVE_CENTER = 0xFFFFFFFF
 
-# dStage_roomControl_c::mStatus and dSv_info_c::mZone.  These are game
-# state tables rather than actor-specific data, so they remain useful for
-# every actor type and stage loaded by the JP build.
+# dStage_roomControl_c::mStatus and dSv_info_c::mZone.
 ROOM_STATUS_BASE = _address("ROOM_STATUS_BASE", 0x803B1188)
 ROOM_STATUS_STRIDE = 0x114
 ROOM_STATUS_COUNT = 64
@@ -532,69 +437,6 @@ _selected_face = None
 _selected_point = None
 
 
-def _sub(a, b):
-    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
-
-
-def _dot(a, b):
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-
-
-def _cross(a, b):
-    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0])
-
-
-def _norm(value):
-    length = math.sqrt(_dot(value, value)) or 1.0
-    return (value[0] / length, value[1] / length, value[2] / length)
-
-
-def _add_scaled(origin, vector, scale):
-    return tuple(origin[index] + vector[index] * scale for index in range(3))
-
-
-def _screen_ray(camera, screen_point):
-    focal = _active_focal()
-    return _norm(tuple(
-        camera.forward[index] + camera.right[index] * (screen_point[0] - W * 0.5) / focal -
-        camera.up[index] * (screen_point[1] - H * 0.5) / focal
-        for index in range(3)))
-
-
-def _forward_from_angles(azimuth, elevation):
-    azimuth = math.radians(azimuth)
-    elevation = math.radians(max(-85.0, min(85.0, elevation)))
-    return (-math.cos(elevation) * math.sin(azimuth), -math.sin(elevation),
-            -math.cos(elevation) * math.cos(azimuth))
-
-
-def _angles_from_forward(forward):
-    forward = _norm(forward)
-    return (math.degrees(math.atan2(-forward[0], -forward[2])),
-            math.degrees(math.asin(max(-1.0, min(1.0, -forward[1])))))
-
-
-class ViewerCamera:
-    near = 5.0
-
-    def __init__(self, position, forward, up=None):
-        self.position = tuple(position)
-        self.forward = _norm(forward)
-        basis_up = up if up is not None and _dot(up, up) > 0.000001 else (0.0, 1.0, 0.0)
-        self.right = _norm(_cross(self.forward, basis_up))
-        self.up = _norm(_cross(self.right, self.forward))
-
-    def project(self, point):
-        relative = _sub(point, self.position)
-        depth = _dot(relative, self.forward)
-        if depth <= self.near:
-            return None
-        focal = _active_focal()
-        return (W * 0.5 + focal * _dot(relative, self.right) / depth,
-                H * 0.5 - focal * _dot(relative, self.up) / depth), depth
-
-
 def _sync_canvas_size():
     global W, H
     width, height = int(canvas.width), int(canvas.height)
@@ -640,163 +482,6 @@ def _cache_state_overlay_snapshot():
         _state_overlay_history[key] = snapshot
     while len(_state_overlay_history) > STATE_OVERLAY_HISTORY_LIMIT:
         _state_overlay_history.pop(next(iter(_state_overlay_history)))
-
-
-def _valid_ptr(value):
-    return 0x80000000 <= value < 0x81800000
-
-
-def _u32(data, offset):
-    return struct.unpack_from(">I", data, offset)[0]
-
-
-def _u16(data, offset):
-    return struct.unpack_from(">H", data, offset)[0]
-
-
-def _vec3(data, offset):
-    return struct.unpack_from(">3f", data, offset)
-
-
-def _finite_vec(value):
-    return all(math.isfinite(component) and abs(component) < 1000000.0 for component in value)
-
-
-def _collider_owner(data):
-    """Read the owner through cCcD_Obj::mStts and cCcD_Stts::mp_actor."""
-    status_ptr = _u32(data, 0x44)
-    if not _valid_ptr(status_ptr):
-        return 0
-    try:
-        actor = memory.read_u32(status_ptr + 0x0C) & 0xFFFFFFFF
-        if _valid_ptr(actor):
-            return actor
-    except Exception:
-        pass
-    return 0
-
-def _collider_attack_info(data):
-    """Read cCcD_ObjAt's mDamageTypes bitmask and mDamage value.
-
-    Both fields live directly on the attack collider's own snapshot bytes
-    -- the same `data` buffer already read for _decode_collider -- at
-    CCS_DAMAGE_TYPE_OFFSET (u32 bitmask, matches the AT_TYPE_* flags) and
-    CCS_DAMAGE_VALUE_OFFSET (u8 damage amount). This mirrors
-    _collider_owner: no extra memory read needed, just different offsets
-    into the buffer the caller already has.
-
-    Returns (damage_type, damage_value), or None if the buffer is too
-    short to hold these fields.
-    """
-    try:
-        damage_type = _u32(data, CCS_DAMAGE_TYPE_OFFSET)
-        damage_value = data[CCS_DAMAGE_VALUE_OFFSET]
-    except (struct.error, IndexError):
-        return None
-    return damage_type, damage_value
-
-
-def _attack_type_names(damage_type):
-    """Decode a mDamageTypes bitmask into its AT_TYPE_* flag names."""
-    names = [name for flag, name in ATTACK_TYPE_FLAGS if damage_type & flag]
-    leftover = damage_type & ~ATTACK_TYPE_MASK & 0xFFFFFFFF
-    if leftover:
-        names.append("0x%X" % leftover)
-    return names
-
-
-def _target_type_names(target_type):
-    """Decode a target's mType bitmask (cCcD_ObjTg::mType) into a compact
-    label. Targets reuse the same AT_TYPE_* flags as attack colliders --
-    mType here is a mask of which attack types can hit this target, not a
-    separate TG_TYPE_* set (see c_cc_d.h/d_cc_d.h; there is no such enum).
-
-    Actor code overwhelmingly writes this as "AT_TYPE_ALL & ~X & ~Y & ..."
-    -- vulnerable to everything except a handful of types -- which would be
-    the most verbose possible case for a plain positive listing (up to all
-    26 named flags). So instead of always listing the set flags like attack
-    info does, this picks whichever of two equivalent representations names
-    fewer flags:
-      - positive, same style as attack info: the flags that ARE set, e.g.
-        "SWORD/BOMB"
-      - negative: "ALL" plus the named flags that are NOT set, e.g.
-        "ALL ~FIRE ~WATER"
-    A tie (exactly half) favors the positive form, matching attack info's
-    plain listing. Unnamed/reserved bits (there are a few -- not every bit
-    in the u32 has an AT_TYPE_* name) are only ever surfaced in the
-    positive form's leftover hex; every "AT_TYPE_ALL & ~..." site in the
-    actor code starts from all bits set and only ever clears named flags,
-    so those reserved bits are always still set whenever the negative form
-    is the one that gets picked, and "ALL" already accounts for them.
-    """
-    set_names = [name for flag, name in ATTACK_TYPE_FLAGS if target_type & flag]
-    clear_names = [name for flag, name in ATTACK_TYPE_FLAGS if not (target_type & flag)]
-    if len(set_names) <= len(clear_names):
-        leftover = target_type & ~ATTACK_TYPE_MASK & 0xFFFFFFFF
-        if leftover:
-            set_names.append("0x%X" % leftover)
-        return "/".join(set_names) if set_names else "NONE"
-    return " ".join(["ALL"] + ["~" + name for name in clear_names])
-
-
-def _shape_kind(data):
-    """Return the concrete cCcD shape using TWW's own vtable identity."""
-    shape_vptr = _u32(data, 0x114)
-    kind = SHAPE_VTABLE_TO_KIND.get(shape_vptr)
-    if kind is not None:
-        return kind
-    cached = _shape_vtable_kind_cache.get(shape_vptr)
-    if cached is not None:
-        return cached
-    if not _valid_ptr(shape_vptr):
-        return None
-    try:
-        table = RD.read_bytes(shape_vptr, 0x18)
-        for offset in (0x14, 0x0C):
-            kind = SHAPE_CROSS_AT_TG_CPS.get(_u32(table, offset))
-            if kind is not None:
-                _shape_vtable_kind_cache[shape_vptr] = kind
-                return kind
-    except Exception:
-        return None
-    return None
-
-
-def _decode_collider(address, data):
-    """Decode the dCcD shape without using stale registry entries."""
-    kind = _shape_kind(data)
-    if kind is None:
-        kind = SHAPE_VTABLE_TO_KIND.get(_u32(data, 0))
-    owner = _collider_owner(data)
-    if kind is None:
-        minimum, maximum = _vec3(data, 0x0F8), _vec3(data, 0x104)
-        half = tuple((maximum[index] - minimum[index]) * 0.5 for index in range(3))
-        center = tuple((maximum[index] + minimum[index]) * 0.5 for index in range(3))
-        if (_finite_vec(minimum) and _finite_vec(maximum) and _finite_vec(center) and
-                all(0.001 <= value <= 100000.0 for value in half)):
-            return ("box", owner, center, half)
-        return None
-    if kind == "cylinder":
-        center = _vec3(data, 0x118)
-        radius, height = struct.unpack_from(">2f", data, 0x124)
-        if _finite_vec(center) and 0.01 <= radius <= 100000.0 and 0.01 <= height <= 100000.0:
-            return ("cylinder", owner, center, radius, height)
-    elif kind == "sphere":
-        center = _vec3(data, 0x118)
-        radius = struct.unpack_from(">f", data, 0x124)[0]
-        if _finite_vec(center) and 0.01 <= radius <= 100000.0:
-            return ("sphere", owner, center, radius)
-    elif kind == "capsule":
-        start, end = _vec3(data, 0x118), _vec3(data, 0x124)
-        radius = struct.unpack_from(">f", data, 0x134)[0]
-        if _finite_vec(start) and _finite_vec(end) and 0.01 <= radius <= 100000.0:
-            return ("capsule", owner, start, end, radius)
-    elif kind == "triangle":
-        points = (_vec3(data, 0x12C), _vec3(data, 0x138), _vec3(data, 0x144))
-        normal = _cross(_sub(points[1], points[0]), _sub(points[2], points[0]))
-        if all(_finite_vec(point) for point in points) and _dot(normal, normal) > 0.0001:
-            return ("triangle", owner, points[0], points[1], points[2])
-    return None
 
 
 def _read_collider_registry(offset, count_offset, sprm_offset, label, slot_count=CCS_SLOT_COUNT,
@@ -846,13 +531,12 @@ def _read_collider_registry(offset, count_offset, sprm_offset, label, slot_count
         if not active_count and not (_u32(data, sprm_offset) & 1):
             continue
         enabled += 1
-        collider = _decode_collider(address, data)
+        collider = COLLIDER_DECODER.decode(data)
         if collider is not None:
             colliders.append(collider)
             for labels_list, builder in label_sinks:
                 builder(labels_list, collider, data)
-    # Preserve the live count when sampling happens before it is cleared. At
-    # the normal script callback point it is expected to be zero.
+    # Preserve a live count sampled before dCcS clears it.
     _runtime_diag[label + "_slots"] = active_count if active_count else slots
     _runtime_diag[label + "_enabled"] = enabled
     _runtime_diag[label + "_decoded"] = len(colliders)
@@ -862,7 +546,7 @@ def _read_collider_registry(offset, count_offset, sprm_offset, label, slot_count
 def _collider_label_anchor(collider):
     """A point a little above the collider's own drawn shape, for anchoring
     its attack-info label. Each kind stores its geometry differently (see
-    _decode_collider / _draw_collider), so the "top" is computed per kind
+    ColliderDecoder / _draw_collider), so the "top" is computed per kind
     rather than assumed to be a plain center + margin.
     """
     kind, _owner, *shape = collider
@@ -870,7 +554,6 @@ def _collider_label_anchor(collider):
         center, half = shape[0], shape[1]
         return (center[0], center[1] + half[1] + ATTACK_LABEL_MARGIN, center[2])
     if kind == "cylinder":
-        # shape[0] is the cylinder's bottom-center, per _draw_cylinder.
         bottom, _radius, height = shape[0], shape[1], shape[2]
         return (bottom[0], bottom[1] + height + ATTACK_LABEL_MARGIN, bottom[2])
     if kind == "sphere":
@@ -880,7 +563,6 @@ def _collider_label_anchor(collider):
         start, end, radius = shape[0], shape[1], shape[2]
         top_y = max(start[1], end[1]) + radius
         return ((start[0] + end[0]) * 0.5, top_y + ATTACK_LABEL_MARGIN, (start[2] + end[2]) * 0.5)
-    # Triangle: shape is three points; anchor above the centroid.
     p0, p1, p2 = shape[0], shape[1], shape[2]
     return (sum(p[0] for p in (p0, p1, p2)) / 3.0,
             sum(p[1] for p in (p0, p1, p2)) / 3.0 + ATTACK_LABEL_MARGIN,
@@ -888,11 +570,7 @@ def _collider_label_anchor(collider):
 
 
 def _append_attack_label(labels, collider, data):
-    """Add one attack-collider label, anchored to the collider's own drawn
-    shape instead of the owner actor's position -- no extra memory read,
-    and a label is only ever built for a collider that just successfully
-    decoded, the exact same way the drawn box did.
-    """
+    """Add attack type and damage above a decoded collider."""
     if len(labels) >= MAX_ACTOR_LABELS:
         return
     info = _collider_attack_info(data)
@@ -908,20 +586,12 @@ def _append_attack_label(labels, collider, data):
 
 
 def _collider_actor_label_anchor(collider):
-    """Same anchor as _collider_label_anchor, raised by
-    ACTOR_LABEL_EXTRA_MARGIN so an Attack/Target/Contact Actor label
-    stacks above an Info label at the same collider instead of drawing on
-    top of it when both are enabled together.
-    """
     x, y, z = _collider_label_anchor(collider)
     return (x, y + ACTOR_LABEL_EXTRA_MARGIN, z)
 
 
 def _append_target_info_label(labels, collider, data):
-    """Add one target-info label (the mType this target accepts), anchored
-    the same way _append_attack_label anchors attack-info -- same buffer
-    already read for _decode_collider, no extra memory read.
-    """
+    """Add the accepted attack types above a target collider."""
     if len(labels) >= MAX_ACTOR_LABELS:
         return
     try:
@@ -935,13 +605,7 @@ def _append_target_info_label(labels, collider, data):
 
 
 def _append_actor_label(labels, collider, data):
-    """Add one owner-name label, using the same proc_name() lookup as
-    Actor Names. collider[1] is already the owner pointer _decode_collider
-    resolved via _collider_owner; one small extra read (like
-    _collider_owner's own read of mStts) turns it into a procedure ID.
-    `data` is unused here but kept so every label_sinks builder below
-    shares the same (labels, collider, data) signature.
-    """
+    """Add the collider owner's procedure name."""
     if len(labels) >= MAX_ACTOR_LABELS:
         return
     owner = collider[1]
@@ -1020,7 +684,7 @@ def _apply_live_colliders(attack, target, push, labels):
         _runtime_diag.update(target_slots=0, target_enabled=0, target_decoded=0)
 
 
-def _read_live_colliders(allow_stale=False):
+def _sample_live_colliders(allow_stale=False):
     labels, sinks = _collider_label_sinks()
     attack = (_read_collider_registry(CCS_ATTACK, CCS_ATTACK_COUNT,
                                       COLLIDER_ATTACK_SPRM, "attack", allow_stale=allow_stale,
@@ -1034,25 +698,18 @@ def _read_live_colliders(allow_stale=False):
                                     COLLIDER_CONTACT_SPRM, "push", allow_stale=allow_stale,
                                     label_sinks=sinks["push"])
             if cb_push.checked else [])
+    return attack, target, push, labels
+
+
+def _read_live_colliders(allow_stale=False):
+    attack, target, push, labels = _sample_live_colliders(allow_stale)
     _apply_live_colliders(attack, target, push, labels)
 
 
 def _capture_live_colliders():
     """Snapshot dCcS while MoveAfterCheck still owns this frame's entries."""
     try:
-        labels, sinks = _collider_label_sinks()
-        attack = (_read_collider_registry(
-            CCS_ATTACK, CCS_ATTACK_COUNT, COLLIDER_ATTACK_SPRM, "attack",
-            label_sinks=sinks["attack"])
-            if cb_attack.checked else [])
-        target = (_read_collider_registry(
-            CCS_TARGET, CCS_TARGET_COUNT, COLLIDER_TARGET_SPRM, "target",
-            CCS_TARGET_SLOT_COUNT, label_sinks=sinks["target"])
-            if cb_target.checked else [])
-        push = (_read_collider_registry(
-            CCS_CONTACT, CCS_CONTACT_COUNT, COLLIDER_CONTACT_SPRM, "push",
-            label_sinks=sinks["push"])
-            if cb_push.checked else [])
+        attack, target, push, labels = _sample_live_colliders()
         _apply_live_colliders(attack, target, push, labels)
         _cache_state_overlay_snapshot()
     except Exception as exc:
@@ -1117,8 +774,7 @@ def _read_actor_triggers():
         elif proc == PROC_TAG_EVSW:
             try:
                 collider_address = actor + ACTOR_SWITCH_CYLINDER
-                collider = _decode_collider(
-                    collider_address, RD.read_bytes(collider_address, 0x150))
+                collider = COLLIDER_DECODER.decode(RD.read_bytes(collider_address, 0x150))
             except Exception:
                 collider = None
             if collider is not None and collider[0] == "cylinder":
@@ -1131,7 +787,6 @@ def _read_actor_triggers():
                                      (position[0], position[1] - half_height, position[2]),
                                      radius, half_height * 2.0))
         elif proc == PROC_TAG_ISLAND:
-            # Island tags use the same authored cylinder convention at sea scale.
             radius, half_height = abs(scale[0]) * 10000.0, abs(scale[1]) * 10000.0
             if radius >= 1.0 and half_height >= 1.0:
                 triggers.append(("cylinder", category,
@@ -1246,7 +901,7 @@ def _probe_plant_collider_offsets(actor):
         if not _valid_ptr(shape_vptr):
             continue
         collider_data = data[offset:offset + 0x150]
-        collider = _decode_collider(actor + offset, collider_data)
+        collider = COLLIDER_DECODER.decode(collider_data)
         if collider is None or collider[1] != actor:
             continue
         if collider[0] not in ("box", "cylinder", "sphere", "capsule", "triangle"):
@@ -1298,7 +953,7 @@ def _read_foliage_colliders(camera, force=False):
                 collider_data = RD.read_bytes(address, 0x150)
             except Exception:
                 continue
-            collider = _decode_collider(address, collider_data)
+            collider = COLLIDER_DECODER.decode(collider_data)
             if collider is None or collider[1] != actor:
                 continue
             seen_colliders.add(address)
@@ -1335,9 +990,9 @@ def _read_state_recovery_colliders():
             status_ptr = _u32(collider_data, 0x44)
             if not actor + 0x290 <= status_ptr < actor + len(data):
                 continue
-            if _shape_kind(collider_data) is None:
+            if COLLIDER_DECODER.shape_kind(collider_data) is None:
                 continue
-            collider = _decode_collider(address, collider_data)
+            collider = COLLIDER_DECODER.decode(collider_data)
             if collider is None or collider[1] != actor:
                 continue
             seen_colliders.add(address)
@@ -1357,7 +1012,7 @@ def _read_player_state_colliders():
     for offset in PLAYER_STATE_COLLIDER_OFFSETS:
         try:
             data = RD.read_bytes(actor + offset, 0x150)
-            collider = _decode_collider(actor + offset, data)
+            collider = COLLIDER_DECODER.decode(data)
         except Exception:
             continue
         if collider is not None and collider[1] == actor:
@@ -1376,7 +1031,7 @@ def _read_player_attack_colliders():
         return colliders
     for offset in PLAYER_ATTACK_COLLIDER_OFFSETS:
         try:
-            collider = _decode_collider(actor + offset, RD.read_bytes(actor + offset, 0x150))
+            collider = COLLIDER_DECODER.decode(RD.read_bytes(actor + offset, 0x150))
         except Exception:
             continue
         if collider is None or collider[1] != actor:
@@ -1431,13 +1086,7 @@ def _refresh_runtime_overlays(force=False, recover_registry=False):
                 _enemy_health = _read_enemy_health(_viewer_camera())
                 if cb_actor_names.checked or cb_move_actor.checked or cb_zone_info.checked:
                     _refresh_actor_records(_viewer_camera())
-                # The saved snapshot only kept decoded collider shapes, not
-                # the raw dCcD_ObjAt/dCcD_ObjTg bytes _collider_attack_info /
-                # _append_target_info_label need, so those two Info labels
-                # aren't available for this recovered frame. The three Actor
-                # labels only need the owner pointer, which a decoded
-                # collider tuple already carries at index 1, so those can
-                # still be rebuilt directly from the snapshot.
+                # Info labels require raw collider bytes; actor labels only need decoded owners.
                 _attack_labels = []
                 _target_info_labels = []
                 _attack_actor_labels = []
@@ -1497,11 +1146,6 @@ def _refresh_runtime_overlays(force=False, recover_registry=False):
         _target_actor_labels = []
     if not (cb_push.checked and cb_contact_actor.checked):
         _contact_actor_labels = []
-    # else: leave each of the label lists above as whatever
-    # _capture_live_colliders() (or _read_live_colliders() above, in the
-    # no-watch/recovery branches) already set this frame -- all of them are
-    # built inline while decoding each collider, so none is ever read
-    # separately/late.
 
 
 def _refresh_game_camera():
@@ -1535,11 +1179,13 @@ def _ensure_freecam():
 
 
 def _viewer_camera():
+    camera_args = {"width": W, "height": H, "focal": _active_focal()}
     if cb_follow_cam.checked and _game_camera is not None:
         eye, target, up, _ = _game_camera
-        return ViewerCamera(eye, _sub(target, eye), up)
+        return ViewerCamera(eye, _sub(target, eye), up, **camera_args)
     _ensure_freecam()
-    return ViewerCamera(_freecam["pos"], _forward_from_angles(_freecam["az"], _freecam["el"]))
+    return ViewerCamera(_freecam["pos"], _forward_from_angles(_freecam["az"], _freecam["el"]),
+                        **camera_args)
 
 
 def _load_seams(stage, room):
