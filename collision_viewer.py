@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import csv
+import json
 import math
 import os
 import struct
@@ -23,17 +24,100 @@ class DolphinReader:
 
 
 RD = DolphinReader()
-LINK_X = Address.X_ADDRESS
-ROOM_NO_ADDR = Address.ROOM_NO
-PLAYER_PTR = Address.PLAYER_POINTER
-GAME_FRAME_COUNTER = Address.FRAME_COUNTER_ADDRESS
-POS_OFFSETS = (Address.ACTOR_OLD_XYZ_OFFSET, Address.ACTOR_XYZ_OFFSET)
-GAME_INFO = Address.GAME_INFO
+
+
+def _address(name, jp_fallback):
+    """Use the shared address table when available, otherwise TWW JP."""
+    value = getattr(Address, name, None)
+    return jp_fallback if value is None else value
+
+
+LINK_X = _address("X_ADDRESS", 0x803D78FC)
+ROOM_NO_ADDR = _address("ROOM_NO", 0x803E9F48)
+PLAYER_PTR = _address("PLAYER_POINTER", 0x803BD910)
+GAME_FRAME_COUNTER = _address("FRAME_COUNTER_ADDRESS", 0x803E9D34)
+POS_OFFSETS = (_address("ACTOR_OLD_XYZ_OFFSET", 0x1E4),
+               _address("ACTOR_XYZ_OFFSET", 0x1F8))
+GAME_INFO = _address("GAME_INFO", 0x803B8108)
 CCS_BASE = GAME_INFO + 0x12A0 + 0x1404
 CCS_ATTACK = 0x0000
 CCS_TARGET = 0x0400
 CCS_CONTACT = 0x1000
 CCS_SLOT_COUNT = 0x100
+AT_TYPE_SWORD = 0x2
+AT_TYPE_UNK8 = 0x8
+AT_TYPE_BOMB = 0x20
+AT_TYPE_BOOMERANG = 0x40
+AT_TYPE_BOKO_STICK = 0x80
+AT_TYPE_WATER = 0x100
+AT_TYPE_FIRE = 0x200
+AT_TYPE_MACHETE = 0x400
+AT_TYPE_UNK800 = 0x800
+AT_TYPE_SPIKE = 0x1000
+AT_TYPE_UNK2000 = 0x2000
+AT_TYPE_NORMAL_ARROW = 0x4000
+AT_TYPE_HOOKSHOT = 0x8000
+AT_TYPE_SKULL_HAMMER = 0x10000
+AT_TYPE_UNK20000 = 0x20000
+AT_TYPE_FIRE_ARROW = 0x40000
+AT_TYPE_ICE_ARROW = 0x80000
+AT_TYPE_LIGHT_ARROW = 0x100000
+AT_TYPE_WIND = 0x200000
+AT_TYPE_UNK400000 = 0x400000
+AT_TYPE_LIGHT = 0x800000
+AT_TYPE_STALFOS_MACE = 0x1000000
+AT_TYPE_FAN_SWING = 0x2000000
+AT_TYPE_DARKNUT_SWORD = 0x4000000
+AT_TYPE_GRAPPLING_HOOK = 0x8000000
+AT_TYPE_MOBLIN_SPEAR = 0x10000000
+AT_TYPE_PGANON_SWORD = 0x20000000
+
+# (flag, name) pairs instead of a name-only tuple keyed by position -- the
+# original ATTACK_TYPE_NAMES tuple had a missing comma between
+# "GRAPPLING_HOOK" and "MOBLIN_SPEAR" (Python silently concatenated them into
+# one string literal), which shifted every name after it out of alignment
+# with its bit. Pairing each name directly with its flag sidesteps that whole
+# class of bug -- order in the tuple no longer matters.
+ATTACK_TYPE_FLAGS = (
+    (AT_TYPE_SWORD, "SWORD"),
+    (AT_TYPE_UNK8, "IMPACT"),
+    (AT_TYPE_BOMB, "BOMB"),
+    (AT_TYPE_BOOMERANG, "BOOMERANG"),
+    (AT_TYPE_BOKO_STICK, "BOKO_STICK"),
+    (AT_TYPE_WATER, "WATER"),
+    (AT_TYPE_FIRE, "FIRE"),
+    (AT_TYPE_MACHETE, "MACHETE"),
+    (AT_TYPE_UNK800, "ENERGY"),
+    (AT_TYPE_SPIKE, "SPIKE"),
+    (AT_TYPE_UNK2000, "SPIN"),
+    (AT_TYPE_NORMAL_ARROW, "NORMAL_ARROW"),
+    (AT_TYPE_HOOKSHOT, "HOOKSHOT"),
+    (AT_TYPE_SKULL_HAMMER, "SKULL_HAMMER"),
+    (AT_TYPE_UNK20000, "FLAME"),
+    (AT_TYPE_FIRE_ARROW, "FIRE_ARROW"),
+    (AT_TYPE_ICE_ARROW, "ICE_ARROW"),
+    (AT_TYPE_LIGHT_ARROW, "LIGHT_ARROW"),
+    (AT_TYPE_WIND, "WIND"),
+    (AT_TYPE_UNK400000, "WIND_GUST"),
+    (AT_TYPE_LIGHT, "LIGHT"),
+    (AT_TYPE_STALFOS_MACE, "STALFOS_MACE"),
+    (AT_TYPE_FAN_SWING, "FAN_SWING"),
+    (AT_TYPE_DARKNUT_SWORD, "DARKNUT_SWORD"),
+    (AT_TYPE_GRAPPLING_HOOK, "GRAPPLING_HOOK"),
+    (AT_TYPE_MOBLIN_SPEAR, "MOBLIN_SPEAR"),
+    (AT_TYPE_PGANON_SWORD, "PGANON_SWORD"),
+)
+# OR of every known flag, so leftover/unknown bits can still be surfaced
+# (as a raw hex value) instead of silently dropped.
+ATTACK_TYPE_MASK = 0
+for _at_flag, _at_name in ATTACK_TYPE_FLAGS:
+    ATTACK_TYPE_MASK |= _at_flag
+del _at_flag, _at_name
+
+CCS_DAMAGE_TYPE_OFFSET = 0x10
+CCS_DAMAGE_VALUE_OFFSET = 0x14
+
+
 CCS_TARGET_SLOT_COUNT = 0x300
 CCS_ATTACK_COUNT = 0x2800
 CCS_TARGET_COUNT = 0x2804
@@ -42,13 +126,18 @@ COLLIDER_SNAPSHOT_WATCH = CCS_BASE + CCS_ATTACK_COUNT
 COLLIDER_ATTACK_SPRM = 0x000
 COLLIDER_TARGET_SPRM = 0x018
 COLLIDER_CONTACT_SPRM = 0x02C
-ACTOR_QUEUE = Address.ACTOR_QUEUE_BASE
-ACTOR_PROC = Address.ACTOR_GPROC_ID_OFFSET
-ACTOR_CURRENT = Address.ACTOR_XYZ_OFFSET
-ACTOR_OLD = Address.ACTOR_OLD_XYZ_OFFSET
-ACTOR_CURRENT_ANGLE = ACTOR_CURRENT + Address.ACTOR_PLACE_ANGLE_OFFSET
-ACTOR_SPEED = Address.ACTOR_XYZ_SPEED_OFFSET
-ACTOR_SCALE = Address.ACTOR_SCALE_OFFSET
+# cCcD_ObjTg::mType sits at +0x10 within its own object, the same relative
+# offset as cCcD_ObjAt::mType (see c_cc_d.h and CCS_DAMAGE_TYPE_OFFSET
+# above) -- mObjTg itself just starts COLLIDER_TARGET_SPRM bytes into the
+# collider record instead of at 0.
+CCS_TARGET_TYPE_OFFSET = COLLIDER_TARGET_SPRM + 0x10
+ACTOR_QUEUE = _address("ACTOR_QUEUE_BASE", 0x803654C8)
+ACTOR_PROC = _address("ACTOR_GPROC_ID_OFFSET", 0x008)
+ACTOR_CURRENT = _address("ACTOR_XYZ_OFFSET", 0x1F8)
+ACTOR_OLD = _address("ACTOR_OLD_XYZ_OFFSET", 0x1E4)
+ACTOR_CURRENT_ANGLE = ACTOR_CURRENT + _address("ACTOR_PLACE_ANGLE_OFFSET", 0x0C)
+ACTOR_SPEED = _address("ACTOR_XYZ_SPEED_OFFSET", 0x220)
+ACTOR_SCALE = _address("ACTOR_SCALE_OFFSET", 0x214)
 ACTOR_MAX_HEALTH = 0x284
 ACTOR_HEALTH = 0x285
 ACTOR_SWITCH_CYLINDER = 0x2D8
@@ -140,7 +229,9 @@ C_PUSH = 0xFF65E6C3
 C_PUSH_LINK = 0xFF8FD3FF
 LOAD_ZONE_HEIGHT = 400.0
 C_ATTACK = 0xFFFFA347
+C_ATTACK_INFO = 0xFFF56827
 C_TARGET = 0xFF5CA8FF
+C_TARGET_INFO = 0xFF3C78FF  # deeper blue than C_TARGET, same relationship as C_ATTACK -> C_ATTACK_INFO
 C_COORDINATE = 0xFF47DFFF
 C_COORDINATE_OUTLINE = 0xFF000000
 C_WIREFRAME = 0xFFFFFFFF
@@ -155,6 +246,12 @@ MAX_ACTOR_LABELS = 256
 HP_BAR_WIDTH = 52.0
 HP_BAR_HEIGHT = 7.0
 MAX_HP_BARS = 96
+ATTACK_LABEL_MARGIN = 20.0
+# Extra height (on top of ATTACK_LABEL_MARGIN, i.e. on top of an Info label
+# at the same collider) an Attack/Target/Contact Actor label is anchored
+# at, so the two stack as separate lines instead of drawing on top of each
+# other when both are enabled together for the same collider category.
+ACTOR_LABEL_EXTRA_MARGIN = 20.0
 MOVE_ACTOR_AXIS_PIXELS = 78.0
 MOVE_ACTOR_AXIS_PICK_RADIUS = 13.0
 MOVE_ACTOR_CENTER_RADIUS = 19.0
@@ -166,15 +263,30 @@ C_MOVE_CENTER = 0xFFFFFFFF
 # dStage_roomControl_c::mStatus and dSv_info_c::mZone.  These are game
 # state tables rather than actor-specific data, so they remain useful for
 # every actor type and stage loaded by the JP build.
-ROOM_STATUS_BASE = Address.ROOM_STATUS_BASE
+ROOM_STATUS_BASE = _address("ROOM_STATUS_BASE", 0x803B1188)
 ROOM_STATUS_STRIDE = 0x114
 ROOM_STATUS_COUNT = 64
 ROOM_STATUS_ZONE_NO_OFFSET = 0x107
-ZONE_ARRAY_BASE = Address.ZONE_ARRAY_BASE
+ZONE_ARRAY_BASE = _address("ZONE_ARRAY_BASE", 0x803B88B0)
 ZONE_STRIDE = 0x4C
 ZONE_COUNT = 32
 
-panel = gui.window("TWW Collision Viewer")
+SETTINGS_PATH = os.path.splitext(os.path.abspath(__file__))[0] + ".settings.json"
+WINDOW_TITLE = "TWW Collision Viewer"
+
+
+def _read_settings_document():
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as settings_file:
+            document = json.load(settings_file)
+        return document if isinstance(document, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+_initial_settings = _read_settings_document()
+
+panel = gui.window(WINDOW_TITLE)
 panel.enable_hardware_canvas()
 canvas = panel.canvas(W, H)
 cb_enabled = panel.checkbox("Collision mesh", True, group="Collision and View")
@@ -209,6 +321,11 @@ cb_push = panel.checkbox("Push colliders", True, group="Colliders")
 cb_attack = panel.checkbox("Attack colliders", True, group="Colliders")
 cb_target = panel.checkbox("Target colliders", True, group="Colliders")
 cb_enemy_hp = panel.checkbox("Enemy HP bars", False, group="Colliders")
+cb_attack_info = panel.checkbox("Attack Info", True, group="Colliders")
+cb_target_info = panel.checkbox("Target Info", False, group="Colliders")
+cb_attack_actor = panel.checkbox("Attack Names", True, group="Colliders")
+cb_target_actor = panel.checkbox("Target Names", False, group="Colliders")
+cb_contact_actor = panel.checkbox("Push Names", False, group="Colliders")
 cb_coordinate_dot = panel.checkbox("Coordinate Dot", True, group="Colliders")
 cb_actor_names = panel.checkbox("Actor Names", False, group="Colliders")
 cb_move_actor = panel.checkbox("Move Actor", False, group="Actor Tools")
@@ -217,6 +334,116 @@ cb_seams = panel.checkbox("Show Seam Clips", False, group="Seam Clips")
 seam_initial_button = panel.button("Teleport seam initial", group="Seam Clips")
 seam_clip_button = panel.button("Teleport seam clip", group="Seam Clips")
 status = panel.text("Waiting for TWW collision...", group="Tools")
+save_settings_button = panel.button("Save Settings", group="Settings")
+
+_CHECKBOX_SETTINGS = {
+    "collision_mesh": cb_enabled,
+    "movable_bg": cb_movebg,
+    "follow_cam": cb_follow_cam,
+    "ground": cb_ground,
+    "slopes": cb_slope,
+    "walls": cb_wall,
+    "roofs": cb_roof,
+    "filled": cb_filled,
+    "wireframe": cb_wire,
+    "xray": cb_xray,
+    "cull_outside_view": cb_view_cull,
+    "vertex_select": cb_vertex_select,
+    "filled_triggers": cb_filled_triggers,
+    "on_top_triggers": cb_on_top_triggers,
+    "load_zones": cb_load,
+    "event_areas": cb_event,
+    "switch_areas": cb_switch,
+    "other_triggers": cb_other,
+    "push_colliders": cb_push,
+    "attack_colliders": cb_attack,
+    "target_colliders": cb_target,
+    "enemy_hp_bars": cb_enemy_hp,
+    "attack_info": cb_attack_info,
+    "target_info": cb_target_info,
+    "attack_names": cb_attack_actor,
+    "target_names": cb_target_actor,
+    "push_names": cb_contact_actor,
+    "coordinate_dot": cb_coordinate_dot,
+    "actor_names": cb_actor_names,
+    "move_actor": cb_move_actor,
+    "zone_room_info": cb_zone_info,
+    "show_seam_clips": cb_seams,
+}
+_SLIDER_SETTINGS = {
+    "freecam_speed": move_speed_slider,
+    "wireframe_opacity": wire_opacity_slider,
+    "collision_opacity": opacity_slider,
+    "draw_radius": radius_slider,
+    "trigger_opacity": trigger_opacity_slider,
+}
+
+
+def _restore_saved_options():
+    options = _initial_settings.get("options", {})
+    if not isinstance(options, dict):
+        return
+    for name, control in _CHECKBOX_SETTINGS.items():
+        value = options.get(name)
+        if isinstance(value, bool):
+            control.checked = value
+    for name, control in _SLIDER_SETTINGS.items():
+        value = options.get(name)
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            control.value = float(value)
+
+
+def _saved_geometry(document):
+    geometry = document.get("window_geometry")
+    if not isinstance(geometry, dict):
+        return None
+    try:
+        values = tuple(int(geometry[name]) for name in ("x", "y", "width", "height"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if values[2] <= 0 or values[3] <= 0:
+        return None
+    return values
+
+
+def _restore_saved_geometry():
+    geometry = _saved_geometry(_initial_settings)
+    set_geometry = getattr(panel, "set_geometry", None)
+    if geometry is not None and set_geometry is not None:
+        set_geometry(*geometry)
+
+
+def _save_settings():
+    document = _read_settings_document()
+    geometry = getattr(panel, "geometry", None)
+    if (isinstance(geometry, tuple) and len(geometry) == 4 and
+            geometry[2] > 0 and geometry[3] > 0):
+        document["window_geometry"] = dict(zip(
+            ("x", "y", "width", "height"), (int(value) for value in geometry)))
+    document["options"] = {
+        **{name: bool(control.checked) for name, control in _CHECKBOX_SETTINGS.items()},
+        **{name: float(control.value) for name, control in _SLIDER_SETTINGS.items()},
+    }
+    temporary_path = SETTINGS_PATH + ".tmp"
+    try:
+        with open(temporary_path, "w", encoding="utf-8", newline="\n") as settings_file:
+            json.dump(document, settings_file, indent=2, sort_keys=True)
+            settings_file.write("\n")
+        os.replace(temporary_path, SETTINGS_PATH)
+        if "window_geometry" in document:
+            status.set("Settings and exact window rectangle saved")
+        else:
+            status.set("Options saved; window rectangle is not available yet")
+    except OSError as exc:
+        status.set("Could not save settings: %s" % exc)
+        try:
+            os.remove(temporary_path)
+        except OSError:
+            pass
+
+
+_restore_saved_options()
+_restore_saved_geometry()
 
 _cache = None
 _snapshot = None
@@ -268,6 +495,11 @@ _attack_colliders = []
 _target_colliders = []
 _enemy_health = []
 _actor_labels = []
+_attack_labels = []
+_attack_actor_labels = []
+_target_info_labels = []
+_target_actor_labels = []
+_contact_actor_labels = []
 _actor_positions = {}
 _actor_records = {}
 _room_zones = {}
@@ -443,6 +675,69 @@ def _collider_owner(data):
         pass
     return 0
 
+def _collider_attack_info(data):
+    """Read cCcD_ObjAt's mDamageTypes bitmask and mDamage value.
+
+    Both fields live directly on the attack collider's own snapshot bytes
+    -- the same `data` buffer already read for _decode_collider -- at
+    CCS_DAMAGE_TYPE_OFFSET (u32 bitmask, matches the AT_TYPE_* flags) and
+    CCS_DAMAGE_VALUE_OFFSET (u8 damage amount). This mirrors
+    _collider_owner: no extra memory read needed, just different offsets
+    into the buffer the caller already has.
+
+    Returns (damage_type, damage_value), or None if the buffer is too
+    short to hold these fields.
+    """
+    try:
+        damage_type = _u32(data, CCS_DAMAGE_TYPE_OFFSET)
+        damage_value = data[CCS_DAMAGE_VALUE_OFFSET]
+    except (struct.error, IndexError):
+        return None
+    return damage_type, damage_value
+
+
+def _attack_type_names(damage_type):
+    """Decode a mDamageTypes bitmask into its AT_TYPE_* flag names."""
+    names = [name for flag, name in ATTACK_TYPE_FLAGS if damage_type & flag]
+    leftover = damage_type & ~ATTACK_TYPE_MASK & 0xFFFFFFFF
+    if leftover:
+        names.append("0x%X" % leftover)
+    return names
+
+
+def _target_type_names(target_type):
+    """Decode a target's mType bitmask (cCcD_ObjTg::mType) into a compact
+    label. Targets reuse the same AT_TYPE_* flags as attack colliders --
+    mType here is a mask of which attack types can hit this target, not a
+    separate TG_TYPE_* set (see c_cc_d.h/d_cc_d.h; there is no such enum).
+
+    Actor code overwhelmingly writes this as "AT_TYPE_ALL & ~X & ~Y & ..."
+    -- vulnerable to everything except a handful of types -- which would be
+    the most verbose possible case for a plain positive listing (up to all
+    26 named flags). So instead of always listing the set flags like attack
+    info does, this picks whichever of two equivalent representations names
+    fewer flags:
+      - positive, same style as attack info: the flags that ARE set, e.g.
+        "SWORD/BOMB"
+      - negative: "ALL" plus the named flags that are NOT set, e.g.
+        "ALL ~FIRE ~WATER"
+    A tie (exactly half) favors the positive form, matching attack info's
+    plain listing. Unnamed/reserved bits (there are a few -- not every bit
+    in the u32 has an AT_TYPE_* name) are only ever surfaced in the
+    positive form's leftover hex; every "AT_TYPE_ALL & ~..." site in the
+    actor code starts from all bits set and only ever clears named flags,
+    so those reserved bits are always still set whenever the negative form
+    is the one that gets picked, and "ALL" already accounts for them.
+    """
+    set_names = [name for flag, name in ATTACK_TYPE_FLAGS if target_type & flag]
+    clear_names = [name for flag, name in ATTACK_TYPE_FLAGS if not (target_type & flag)]
+    if len(set_names) <= len(clear_names):
+        leftover = target_type & ~ATTACK_TYPE_MASK & 0xFFFFFFFF
+        if leftover:
+            set_names.append("0x%X" % leftover)
+        return "/".join(set_names) if set_names else "NONE"
+    return " ".join(["ALL"] + ["~" + name for name in clear_names])
+
 
 def _shape_kind(data):
     """Return the concrete cCcD shape using TWW's own vtable identity."""
@@ -505,8 +800,17 @@ def _decode_collider(address, data):
 
 
 def _read_collider_registry(offset, count_offset, sprm_offset, label, slot_count=CCS_SLOT_COUNT,
-                            allow_stale=False):
-    """Read active dCcD objects from one bounded dCcS registry."""
+                            allow_stale=False, label_sinks=()):
+    """Read active dCcD objects from one bounded dCcS registry.
+
+    label_sinks is an iterable of (labels_list, builder) pairs -- e.g.
+    (attack_labels, _append_attack_label) or
+    (target_info_labels, _append_target_info_label). Each collider that
+    successfully decodes in the loop below is passed to every builder in
+    the same pass, so a label only ever exists for a collider that is
+    actually about to be drawn, instead of coming from a second,
+    separately-timed scan of the same slots.
+    """
     colliders, seen = [], set()
     slots = enabled = 0
     try:
@@ -545,6 +849,8 @@ def _read_collider_registry(offset, count_offset, sprm_offset, label, slot_count
         collider = _decode_collider(address, data)
         if collider is not None:
             colliders.append(collider)
+            for labels_list, builder in label_sinks:
+                builder(labels_list, collider, data)
     # Preserve the live count when sampling happens before it is cleared. At
     # the normal script callback point it is expected to be zero.
     _runtime_diag[label + "_slots"] = active_count if active_count else slots
@@ -553,23 +859,159 @@ def _read_collider_registry(offset, count_offset, sprm_offset, label, slot_count
     return colliders
 
 
-def _read_live_colliders(allow_stale=False):
+def _collider_label_anchor(collider):
+    """A point a little above the collider's own drawn shape, for anchoring
+    its attack-info label. Each kind stores its geometry differently (see
+    _decode_collider / _draw_collider), so the "top" is computed per kind
+    rather than assumed to be a plain center + margin.
+    """
+    kind, _owner, *shape = collider
+    if kind == "box":
+        center, half = shape[0], shape[1]
+        return (center[0], center[1] + half[1] + ATTACK_LABEL_MARGIN, center[2])
+    if kind == "cylinder":
+        # shape[0] is the cylinder's bottom-center, per _draw_cylinder.
+        bottom, _radius, height = shape[0], shape[1], shape[2]
+        return (bottom[0], bottom[1] + height + ATTACK_LABEL_MARGIN, bottom[2])
+    if kind == "sphere":
+        center, radius = shape[0], shape[1]
+        return (center[0], center[1] + radius + ATTACK_LABEL_MARGIN, center[2])
+    if kind == "capsule":
+        start, end, radius = shape[0], shape[1], shape[2]
+        top_y = max(start[1], end[1]) + radius
+        return ((start[0] + end[0]) * 0.5, top_y + ATTACK_LABEL_MARGIN, (start[2] + end[2]) * 0.5)
+    # Triangle: shape is three points; anchor above the centroid.
+    p0, p1, p2 = shape[0], shape[1], shape[2]
+    return (sum(p[0] for p in (p0, p1, p2)) / 3.0,
+            sum(p[1] for p in (p0, p1, p2)) / 3.0 + ATTACK_LABEL_MARGIN,
+            sum(p[2] for p in (p0, p1, p2)) / 3.0)
+
+
+def _append_attack_label(labels, collider, data):
+    """Add one attack-collider label, anchored to the collider's own drawn
+    shape instead of the owner actor's position -- no extra memory read,
+    and a label is only ever built for a collider that just successfully
+    decoded, the exact same way the drawn box did.
+    """
+    if len(labels) >= MAX_ACTOR_LABELS:
+        return
+    info = _collider_attack_info(data)
+    if info is None:
+        return
+    damage_type, damage_value = info
+    position = _collider_label_anchor(collider)
+    if not _finite_vec(position):
+        return
+    names = _attack_type_names(damage_type)
+    label = "%s  DMG %d" % ("/".join(names) if names else "NONE", damage_value)
+    labels.append((position, label))
+
+
+def _collider_actor_label_anchor(collider):
+    """Same anchor as _collider_label_anchor, raised by
+    ACTOR_LABEL_EXTRA_MARGIN so an Attack/Target/Contact Actor label
+    stacks above an Info label at the same collider instead of drawing on
+    top of it when both are enabled together.
+    """
+    x, y, z = _collider_label_anchor(collider)
+    return (x, y + ACTOR_LABEL_EXTRA_MARGIN, z)
+
+
+def _append_target_info_label(labels, collider, data):
+    """Add one target-info label (the mType this target accepts), anchored
+    the same way _append_attack_label anchors attack-info -- same buffer
+    already read for _decode_collider, no extra memory read.
+    """
+    if len(labels) >= MAX_ACTOR_LABELS:
+        return
+    try:
+        target_type = _u32(data, CCS_TARGET_TYPE_OFFSET)
+    except (struct.error, IndexError):
+        return
+    position = _collider_label_anchor(collider)
+    if not _finite_vec(position):
+        return
+    labels.append((position, _target_type_names(target_type)))
+
+
+def _append_actor_label(labels, collider, data):
+    """Add one owner-name label, using the same proc_name() lookup as
+    Actor Names. collider[1] is already the owner pointer _decode_collider
+    resolved via _collider_owner; one small extra read (like
+    _collider_owner's own read of mStts) turns it into a procedure ID.
+    `data` is unused here but kept so every label_sinks builder below
+    shares the same (labels, collider, data) signature.
+    """
+    if len(labels) >= MAX_ACTOR_LABELS:
+        return
+    owner = collider[1]
+    if not owner:
+        return
+    try:
+        procedure = memory.read_u16(owner + ACTOR_PROC)
+    except Exception:
+        return
+    position = _collider_actor_label_anchor(collider)
+    if not _finite_vec(position):
+        return
+    labels.append((position, proc_name(procedure, "Proc 0x%03X" % procedure)))
+
+
+def _collider_label_sinks():
+    labels = {
+        "attack_info": [] if cb_attack.checked and cb_attack_info.checked else None,
+        "attack_actor": [] if cb_attack.checked and cb_attack_actor.checked else None,
+        "target_info": [] if cb_target.checked and cb_target_info.checked else None,
+        "target_actor": [] if cb_target.checked and cb_target_actor.checked else None,
+        "contact_actor": [] if cb_push.checked and cb_contact_actor.checked else None,
+    }
+    sinks = {"attack": [], "target": [], "push": []}
+    if labels["attack_info"] is not None:
+        sinks["attack"].append((labels["attack_info"], _append_attack_label))
+    if labels["attack_actor"] is not None:
+        sinks["attack"].append((labels["attack_actor"], _append_actor_label))
+    if labels["target_info"] is not None:
+        sinks["target"].append((labels["target_info"], _append_target_info_label))
+    if labels["target_actor"] is not None:
+        sinks["target"].append((labels["target_actor"], _append_actor_label))
+    if labels["contact_actor"] is not None:
+        sinks["push"].append((labels["contact_actor"], _append_actor_label))
+    return labels, sinks
+
+
+def _apply_live_colliders(attack, target, push, labels):
     global _push_colliders, _attack_colliders, _target_colliders
-    attack = (_read_collider_registry(CCS_ATTACK, CCS_ATTACK_COUNT,
-                                      COLLIDER_ATTACK_SPRM, "attack", allow_stale=allow_stale)
-              if cb_attack.checked else [])
-    target = (_read_collider_registry(CCS_TARGET, CCS_TARGET_COUNT,
-                                      COLLIDER_TARGET_SPRM, "target", CCS_TARGET_SLOT_COUNT,
-                                      allow_stale) if cb_target.checked else [])
-    push = (_read_collider_registry(CCS_CONTACT, CCS_CONTACT_COUNT,
-                                    COLLIDER_CONTACT_SPRM, "push", allow_stale=allow_stale)
-            if cb_push.checked else [])
+    global _attack_labels, _attack_actor_labels
+    global _target_info_labels, _target_actor_labels, _contact_actor_labels
+
     if attack is not None:
         _attack_colliders = attack
+        if labels["attack_info"] is not None:
+            _attack_labels = labels["attack_info"]
+        if labels["attack_actor"] is not None:
+            _attack_actor_labels = labels["attack_actor"]
     if target is not None:
         _target_colliders = target
+        if labels["target_info"] is not None:
+            _target_info_labels = labels["target_info"]
+        if labels["target_actor"] is not None:
+            _target_actor_labels = labels["target_actor"]
     if push is not None:
         _push_colliders = push
+        if labels["contact_actor"] is not None:
+            _contact_actor_labels = labels["contact_actor"]
+
+    if labels["attack_info"] is None:
+        _attack_labels = []
+    if labels["attack_actor"] is None:
+        _attack_actor_labels = []
+    if labels["target_info"] is None:
+        _target_info_labels = []
+    if labels["target_actor"] is None:
+        _target_actor_labels = []
+    if labels["contact_actor"] is None:
+        _contact_actor_labels = []
+
     if not cb_attack.checked:
         _runtime_diag.update(attack_slots=0, attack_enabled=0, attack_decoded=0)
     if not cb_push.checked:
@@ -578,31 +1020,40 @@ def _read_live_colliders(allow_stale=False):
         _runtime_diag.update(target_slots=0, target_enabled=0, target_decoded=0)
 
 
+def _read_live_colliders(allow_stale=False):
+    labels, sinks = _collider_label_sinks()
+    attack = (_read_collider_registry(CCS_ATTACK, CCS_ATTACK_COUNT,
+                                      COLLIDER_ATTACK_SPRM, "attack", allow_stale=allow_stale,
+                                      label_sinks=sinks["attack"])
+              if cb_attack.checked else [])
+    target = (_read_collider_registry(CCS_TARGET, CCS_TARGET_COUNT,
+                                      COLLIDER_TARGET_SPRM, "target", CCS_TARGET_SLOT_COUNT,
+                                      allow_stale, label_sinks=sinks["target"])
+              if cb_target.checked else [])
+    push = (_read_collider_registry(CCS_CONTACT, CCS_CONTACT_COUNT,
+                                    COLLIDER_CONTACT_SPRM, "push", allow_stale=allow_stale,
+                                    label_sinks=sinks["push"])
+            if cb_push.checked else [])
+    _apply_live_colliders(attack, target, push, labels)
+
+
 def _capture_live_colliders():
     """Snapshot dCcS while MoveAfterCheck still owns this frame's entries."""
-    global _push_colliders, _attack_colliders, _target_colliders
     try:
+        labels, sinks = _collider_label_sinks()
         attack = (_read_collider_registry(
-            CCS_ATTACK, CCS_ATTACK_COUNT, COLLIDER_ATTACK_SPRM, "attack")
+            CCS_ATTACK, CCS_ATTACK_COUNT, COLLIDER_ATTACK_SPRM, "attack",
+            label_sinks=sinks["attack"])
             if cb_attack.checked else [])
         target = (_read_collider_registry(
             CCS_TARGET, CCS_TARGET_COUNT, COLLIDER_TARGET_SPRM, "target",
-            CCS_TARGET_SLOT_COUNT) if cb_target.checked else [])
+            CCS_TARGET_SLOT_COUNT, label_sinks=sinks["target"])
+            if cb_target.checked else [])
         push = (_read_collider_registry(
-            CCS_CONTACT, CCS_CONTACT_COUNT, COLLIDER_CONTACT_SPRM, "push")
+            CCS_CONTACT, CCS_CONTACT_COUNT, COLLIDER_CONTACT_SPRM, "push",
+            label_sinks=sinks["push"])
             if cb_push.checked else [])
-        if attack is not None:
-            _attack_colliders = attack
-        if target is not None:
-            _target_colliders = target
-        if push is not None:
-            _push_colliders = push
-        if not cb_attack.checked:
-            _runtime_diag.update(attack_slots=0, attack_enabled=0, attack_decoded=0)
-        if not cb_push.checked:
-            _runtime_diag.update(push_slots=0, push_enabled=0, push_decoded=0)
-        if not cb_target.checked:
-            _runtime_diag.update(target_slots=0, target_enabled=0, target_decoded=0)
+        _apply_live_colliders(attack, target, push, labels)
         _cache_state_overlay_snapshot()
     except Exception as exc:
         _runtime_diag["capture_error"] = str(exc)
@@ -955,7 +1406,8 @@ def _merge_actor_fallbacks():
 def _refresh_runtime_overlays(force=False, recover_registry=False):
     global _triggers, _trigger_filter_key, _push_colliders, _attack_colliders, _target_colliders
     global _actor_fallback_colliders, _state_recovery_colliders, _player_attack_colliders, _enemy_health
-    global _actor_labels
+    global _actor_labels, _attack_labels, _attack_actor_labels
+    global _target_info_labels, _target_actor_labels, _contact_actor_labels
     filter_key = (cb_load.checked, cb_event.checked, cb_switch.checked, cb_other.checked)
     if force or filter_key != _trigger_filter_key or _frame % ACTOR_REFRESH_INTERVAL == 0:
         _triggers = _read_actor_triggers()
@@ -979,6 +1431,27 @@ def _refresh_runtime_overlays(force=False, recover_registry=False):
                 _enemy_health = _read_enemy_health(_viewer_camera())
                 if cb_actor_names.checked or cb_move_actor.checked or cb_zone_info.checked:
                     _refresh_actor_records(_viewer_camera())
+                # The saved snapshot only kept decoded collider shapes, not
+                # the raw dCcD_ObjAt/dCcD_ObjTg bytes _collider_attack_info /
+                # _append_target_info_label need, so those two Info labels
+                # aren't available for this recovered frame. The three Actor
+                # labels only need the owner pointer, which a decoded
+                # collider tuple already carries at index 1, so those can
+                # still be rebuilt directly from the snapshot.
+                _attack_labels = []
+                _target_info_labels = []
+                _attack_actor_labels = []
+                if cb_attack.checked and cb_attack_actor.checked:
+                    for collider in _attack_colliders:
+                        _append_actor_label(_attack_actor_labels, collider, None)
+                _target_actor_labels = []
+                if cb_target.checked and cb_target_actor.checked:
+                    for collider in _target_colliders:
+                        _append_actor_label(_target_actor_labels, collider, None)
+                _contact_actor_labels = []
+                if cb_push.checked and cb_contact_actor.checked:
+                    for collider in _push_colliders:
+                        _append_actor_label(_contact_actor_labels, collider, None)
                 return
             _read_live_colliders(allow_stale=True)
             if _valid_ptr(_link_actor):
@@ -1014,6 +1487,21 @@ def _refresh_runtime_overlays(force=False, recover_registry=False):
             _refresh_actor_records(_viewer_camera())
     else:
         _actor_labels = []
+    if not (cb_attack.checked and cb_attack_info.checked):
+        _attack_labels = []
+    if not (cb_attack.checked and cb_attack_actor.checked):
+        _attack_actor_labels = []
+    if not (cb_target.checked and cb_target_info.checked):
+        _target_info_labels = []
+    if not (cb_target.checked and cb_target_actor.checked):
+        _target_actor_labels = []
+    if not (cb_push.checked and cb_contact_actor.checked):
+        _contact_actor_labels = []
+    # else: leave each of the label lists above as whatever
+    # _capture_live_colliders() (or _read_live_colliders() above, in the
+    # no-watch/recovery branches) already set this frame -- all of them are
+    # built inline while decoding each collider, so none is ever read
+    # separately/late.
 
 
 def _refresh_game_camera():
@@ -1982,6 +2470,64 @@ def _draw_actor_names_hud(hud, camera):
         hud.text((x, y), 0xFFFFFFFF, label)
 
 
+def _project_labels(camera, labels):
+    """Project (position, text) labels to screen space, culling anything
+    off-canvas, and depth-sort back-to-front (nearest drawn last, so it
+    ends up on top of anything it overlaps). Shared by every *_hud drawer
+    below whose labels already carry their own on-screen anchor point --
+    _draw_attack_info_hud and the Target Info / Attack Actor / Target
+    Actor / Contact Actor drawers.
+    """
+    projected_labels = []
+    for position, label in labels:
+        projected = camera.project(position)
+        if projected is None:
+            continue
+        point, depth = projected
+        if point[0] < -160.0 or point[0] > W + 160.0 or point[1] < -24.0 or point[1] > H + 24.0:
+            continue
+        projected_labels.append((depth, point, label))
+    projected_labels.sort(reverse=True)
+    return projected_labels
+
+
+def _draw_label_set(hud, camera, labels, color):
+    """Draw a projected (position, text) label list with the standard drop
+    shadow, in `color`. Shared body for every simple info/actor-name HUD
+    drawer -- callers just supply their own labels list, checkbox gate and
+    color.
+    """
+    for _depth, point, label in _project_labels(camera, labels):
+        x, y = point[0] - len(label) * 3.5, point[1] - 12.0
+        hud.text((x + 1.0, y + 1.0), 0xE6000000, label)
+        hud.text((x, y), color, label)
+
+
+def _draw_attack_info_hud(hud, camera):
+    if cb_attack.checked and cb_attack_info.checked:
+        _draw_label_set(hud, camera, _attack_labels, C_ATTACK_INFO)
+
+
+def _draw_attack_actor_hud(hud, camera):
+    if cb_attack.checked and cb_attack_actor.checked:
+        _draw_label_set(hud, camera, _attack_actor_labels, C_ATTACK)
+
+
+def _draw_target_info_hud(hud, camera):
+    if cb_target.checked and cb_target_info.checked:
+        _draw_label_set(hud, camera, _target_info_labels, C_TARGET_INFO)
+
+
+def _draw_target_actor_hud(hud, camera):
+    if cb_target.checked and cb_target_actor.checked:
+        _draw_label_set(hud, camera, _target_actor_labels, C_TARGET)
+
+
+def _draw_contact_actor_hud(hud, camera):
+    if cb_push.checked and cb_contact_actor.checked:
+        _draw_label_set(hud, camera, _contact_actor_labels, C_PUSH)
+
+
 def _draw_zone_info_hud(hud):
     if not cb_zone_info.checked or _snapshot is None:
         return
@@ -2016,10 +2562,11 @@ def _draw_move_actor_hud(hud):
     hud.text((x0 + 12, y0 + 34), text, "Address: 0x%08X   Proc ID: 0x%03X" % (_move_actor_selected, procedure))
     hud.text((x0 + 12, y0 + 58), text, "Position: X=%.3f  Y=%.3f  Z=%.3f" % position)
     hud.text((x0 + 12, y0 + 80), text, "Rotation: X=%d  Y=%d  Z=%d" % rotation)
-    freeze, actor_to_link, link_to_actor = _move_actor_button_rects()
+    freeze, actor_to_link, link_to_actor, copy_watches = _move_actor_button_rects()
     locked = _move_actor_selected in _move_actor_locks
     for rect, title in ((freeze, "Unfreeze Actor" if locked else "Freeze Actor"),
-                        (actor_to_link, "Teleport to Link"), (link_to_actor, "Teleport to Actor")):
+                        (actor_to_link, "Teleport to Link"), (link_to_actor, "Teleport to Actor"),
+                        (copy_watches, "Copy XYZ Watch Addresses")):
         hud.rect_filled((rect[0], rect[1]), (rect[2], rect[3]), button, 2)
         hud.text((rect[0] + 100, rect[1] + 5), text, title)
     projected = _viewer_camera().project(position)
@@ -2049,6 +2596,11 @@ def _update_overlay_text(camera):
     selected_point = _selected_xyz_text() if _selected_point is not None else None
     key = (W, H, _clean_capture, cb_seams.checked, cb_vertex_select.checked, len(_seams["clips"]),
            cb_enemy_hp.checked, tuple(_enemy_health), cb_actor_names.checked, tuple(_actor_labels),
+           cb_attack_info.checked, tuple(_attack_labels),
+           cb_attack_actor.checked, tuple(_attack_actor_labels),
+           cb_target_info.checked, tuple(_target_info_labels),
+           cb_target_actor.checked, tuple(_target_actor_labels),
+           cb_contact_actor.checked, tuple(_contact_actor_labels),
            cb_zone_info.checked, tuple(sorted(_room_zones.items())), tuple(sorted(_zones.items())),
            cb_move_actor.checked, _move_actor_selected, _selected_actor_hud_info(),
            tuple(sorted((actor, lock["position"]) for actor, lock in _move_actor_locks.items())),
@@ -2114,6 +2666,11 @@ def _update_overlay_text(camera):
     # mode when enabled; normal canvas controls stay hidden there.
     _draw_enemy_hp_hud(hud, camera)
     _draw_actor_names_hud(hud, camera)
+    _draw_attack_info_hud(hud, camera)
+    _draw_attack_actor_hud(hud, camera)
+    _draw_target_info_hud(hud, camera)
+    _draw_target_actor_hud(hud, camera)
+    _draw_contact_actor_hud(hud, camera)
     _draw_coordinate_dot_hud(hud, camera)
     if not cb_move_actor.checked:
         _draw_zone_info_hud(hud)
@@ -2302,14 +2859,24 @@ def _selected_actor_hud_info():
 
 
 def _move_actor_hud_layout():
-    return (10.0, 150.0, 420.0, 216.0) if _move_actor_selected is None else (10.0, 150.0, 430.0, 360.0)
+    return (10.0, 150.0, 420.0, 216.0) if _move_actor_selected is None else (10.0, 150.0, 430.0, 394.0)
 
 
 def _move_actor_button_rects():
     x0, y0, x1, _y1 = _move_actor_hud_layout()
     return ((x0 + 10.0, y0 + 104.0, x1 - 10.0, y0 + 132.0),
             (x0 + 10.0, y0 + 138.0, x1 - 10.0, y0 + 166.0),
-            (x0 + 10.0, y0 + 172.0, x1 - 10.0, y0 + 200.0))
+            (x0 + 10.0, y0 + 172.0, x1 - 10.0, y0 + 200.0),
+            (x0 + 10.0, y0 + 206.0, x1 - 10.0, y0 + 234.0))
+
+
+def _selected_actor_watch_text():
+    """Return the three direct Free Look coordinate addresses as one clipboard block."""
+    actor = _move_actor_selected
+    if actor is None or not _valid_ptr(actor):
+        return None
+    x_address = actor + ACTOR_CURRENT
+    return "0x%08X\n0x%08X\n0x%08X" % (x_address, x_address + 4, x_address + 8)
 
 
 def _toggle_selected_actor_lock():
@@ -2460,13 +3027,18 @@ def _handle_move_actor(camera, click):
         return True, True
     x0, y0, x1, y1 = _move_actor_hud_layout()
     if click is not None and x0 <= click[0] <= x1 and y0 <= click[1] <= y1:
-        freeze, actor_to_link, link_to_actor = _move_actor_button_rects()
+        freeze, actor_to_link, link_to_actor, copy_watches = _move_actor_button_rects()
         if _move_actor_selected is not None and freeze[0] <= click[0] <= freeze[2] and freeze[1] <= click[1] <= freeze[3]:
             return _toggle_selected_actor_lock(), True
         if _move_actor_selected is not None and actor_to_link[0] <= click[0] <= actor_to_link[2] and actor_to_link[1] <= click[1] <= actor_to_link[3]:
             return _teleport_selected_actor_to_link(), True
         if _move_actor_selected is not None and link_to_actor[0] <= click[0] <= link_to_actor[2] and link_to_actor[1] <= click[1] <= link_to_actor[3]:
             return _teleport_link_to_selected_actor(), True
+        if _move_actor_selected is not None and copy_watches[0] <= click[0] <= copy_watches[2] and copy_watches[1] <= click[1] <= copy_watches[3]:
+            watch_text = _selected_actor_watch_text()
+            if watch_text is not None:
+                gui.set_clipboard(watch_text)
+                return True, True
         return True, True
     if click is not None:
         if _move_actor_selected is not None:
@@ -2531,11 +3103,14 @@ def _draw_move_actor_gizmo(camera):
             _start, _end, end_world = geometry
             _queue_line(position, end_world, color)
             _queue_marker(end_world, radius, color)
+            
 
 
 def _draw_scene():
     global _line_positions, _line_colors, _marker_positions, _marker_colors
     global _volume_positions, _volume_colors
+    if save_settings_button.clicked:
+        _save_settings()
     _sync_canvas_size()
     if _snapshot is None:
         return
@@ -2739,7 +3314,9 @@ def on_savestateload(*_):
     global _hardware_line_key, _hardware_on_top_line_key, _hardware_marker_key, _hardware_volume_key
     global _hardware_overlay_key, _stage_visible
     global _triggers, _push_colliders, _attack_colliders, _target_colliders, _player_attack_colliders
-    global _enemy_health, _actor_labels, _actor_positions, _actor_records, _room_zones, _zones
+    global _enemy_health, _actor_labels, _attack_labels, _attack_actor_labels
+    global _target_info_labels, _target_actor_labels, _contact_actor_labels
+    global _actor_positions, _actor_records, _room_zones, _zones
     global _trigger_filter_key, _link_actor, _selected_face
     global _actor_fallback_colliders, _state_recovery_colliders, _foliage_probe_offsets
     global _state_load_pending, _state_load_wait_ticks, _state_load_signature
@@ -2754,6 +3331,11 @@ def on_savestateload(*_):
     _player_attack_colliders = []
     _enemy_health = []
     _actor_labels = []
+    _attack_labels = []
+    _attack_actor_labels = []
+    _target_info_labels = []
+    _target_actor_labels = []
+    _contact_actor_labels = []
     _actor_positions = {}
     _actor_records = {}
     _room_zones = {}
@@ -2783,9 +3365,7 @@ def on_savestateload(*_):
 
 
 def _remove_collider_watch():
-    """Drop the collider memcheck so toggling the script off doesn't leave the
-    emulator on the slow memory path. There is no script-unload event, but
-    Py_EndInterpreter runs atexit handlers when the script is stopped."""
+    """Remove the write watch when the script interpreter shuts down."""
     for remove in (getattr(memory, "remove_memcheck", None),
                    getattr(debug, "remove_memory_breakpoint", None)):
         if remove is None:
